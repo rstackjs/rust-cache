@@ -25,6 +25,7 @@ async function run() {
       cacheOnFailure = "false";
     }
     var lookupOnly = core.getInput("lookup-only").toLowerCase() === "true";
+    var fullMatchOnly = core.getInput("fullmatch-only").toLowerCase() === "true";
 
     core.exportVariable("CACHE_ON_FAILURE", cacheOnFailure);
     core.exportVariable("CARGO_INCREMENTAL", 0);
@@ -38,7 +39,7 @@ async function run() {
     // Pass a copy of cachePaths to avoid mutating the original array as reported by:
     // https://github.com/actions/toolkit/pull/1378
     // TODO: remove this once the underlying bug is fixed.
-    const restoreKey = await cacheProvider.cache.restoreCache(config.cachePaths.slice(), key, [config.restoreKey], {
+    const restoreKey = await cacheProvider.cache.restoreCache(config.cachePaths.slice(), key, fullMatchOnly ? [] : [config.restoreKey], {
       lookupOnly,
     });
     if (restoreKey) {
