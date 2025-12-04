@@ -1,3 +1,10 @@
+# Note
+
+> It's modified for Rspack's self-hosted runner's rust cache management. 
+> And It can not function properly in other runner environments.
+
+Fork from https://github.com/Swatinem/rust-cache
+
 # Rust Cache Action
 
 A GitHub Action that implements smart caching for rust/cargo projects with
@@ -12,7 +19,7 @@ sensible defaults.
 # before the plugin, as the cache uses the current rustc version as its cache key
 - run: rustup toolchain install stable --profile minimal
 
-- uses: Swatinem/rust-cache@v2
+- uses: rspack-contrib/rust-cache@v2
   with:
     # The prefix cache key, this can be changed to start a new cache manually.
     # default: "v0-rust"
