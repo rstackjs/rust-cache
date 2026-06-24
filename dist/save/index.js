@@ -79396,7 +79396,7 @@ async function exists(path) {
 
 
 
-const SAVE_TARGETS = new Set(["lib", "proc-macro"]);
+const SAVE_TARGETS = new Set(["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"]);
 class Workspace {
     constructor(root, target) {
         this.root = root;
