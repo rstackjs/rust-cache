@@ -79408,6 +79408,7 @@ class Workspace {
             lib_core.debug(`collecting metadata for "${this.root}"`);
             const meta = JSON.parse(await getCmdOutput("cargo", ["metadata", "--all-features", "--format-version", "1", ...extraArgs], {
                 cwd: this.root,
+                env: { ...process.env, "CARGO_ENCODED_RUSTFLAGS": "" },
             }));
             lib_core.debug(`workspace "${this.root}" has ${meta.packages.length} packages`);
             for (const pkg of meta.packages.filter(filter)) {
@@ -79461,7 +79462,7 @@ class CacheConfig {
         /** The prefix portion of the cache key */
         this.keyPrefix = "";
         /** The rust version considered for the cache key */
-        this.keyRust = "";
+        this.keyRust = [];
         /** The environment variables considered for the cache key */
         this.keyEnvs = [];
         /** The files considered for the cache key */
@@ -79504,12 +79505,15 @@ class CacheConfig {
         // The env vars are sorted, matched by prefix and hashed into the
         // resulting environment hash.
         let hasher = external_crypto_default().createHash("sha1");
-        const rustVersion = await getRustVersion();
-        let keyRust = `${rustVersion.release} ${rustVersion.host}`;
-        hasher.update(keyRust);
-        hasher.update(rustVersion["commit-hash"]);
-        keyRust += ` (${rustVersion["commit-hash"]})`;
-        self.keyRust = keyRust;
+        const rustVersions = Array.from(await getRustVersions());
+        // Doesn't matter how they're sorted, just as long as it's deterministic.
+        rustVersions.sort();
+        for (const rustVersion of rustVersions) {
+            const { release, host, "commit-hash": commitHash } = rustVersion;
+            const keyRust = `${release} ${host} ${commitHash}`;
+            hasher.update(keyRust);
+            self.keyRust.push(keyRust);
+        }
         // these prefixes should cover most of the compiler / rust / cargo keys
         const envPrefixes = ["CARGO", "CC", "CFLAGS", "CXX", "CMAKE", "RUST"];
         envPrefixes.push(...lib_core.getInput("env-vars").split(/\s+/).filter(Boolean));
@@ -79688,7 +79692,10 @@ class CacheConfig {
         lib_core.info(`.. Prefix:`);
         lib_core.info(`  - ${this.keyPrefix}`);
         lib_core.info(`.. Environment considered:`);
-        lib_core.info(`  - Rust Version: ${this.keyRust}`);
+        lib_core.info(`  - Rust Versions:`);
+        for (const rust of this.keyRust) {
+            lib_core.info(`    - ${rust}`);
+        }
         for (const env of this.keyEnvs) {
             lib_core.info(`  - ${env}`);
         }
@@ -79723,9 +79730,31 @@ function isCacheUpToDate() {
 function digest(hasher) {
     return hasher.digest("hex").substring(0, HASH_LENGTH);
 }
-async function getRustVersion() {
-    const stdout = await getCmdOutput("rustc", ["-vV"]);
-    let splits = stdout
+async function getRustVersions() {
+    const versions = new Set();
+    versions.add(parseRustVersion(await getCmdOutput("rustc", ["-vV"])));
+    const stdout = await (async () => {
+        try {
+            return await getCmdOutput("rustup", ["toolchain", "list", "--quiet"]);
+        }
+        catch (e) {
+            lib_core.warning(`Error running rustup toolchain list, falling back to default toolchain only: ${e}`);
+            return undefined;
+        }
+    })();
+    if (stdout !== undefined) {
+        for (const toolchain of stdout.split(/[\n\r]+/)) {
+            const trimmed = toolchain.trim();
+            if (!trimmed) {
+                continue;
+            }
+            versions.add(parseRustVersion(await getCmdOutput("rustup", ["run", trimmed, "rustc", "-vV"])));
+        }
+    }
+    return versions;
+}
+function parseRustVersion(stdout) {
+    const splits = stdout
         .split(/[\n\r]+/)
         .filter(Boolean)
         .map((s) => s.split(":").map((s) => s.trim()))
@@ -79812,7 +79841,7 @@ async function cleanProfileTarget(profileDir, packages, checkTimestamp = false) 
     }
     let keepProfile = new Set(["build", ".fingerprint", "deps"]);
     await rmExcept(profileDir, keepProfile);
-    const keepPkg = new Set(packages.map((p) => p.name));
+    const keepPkg = new Set(packages.flatMap((p) => [p.name, ...p.targets.map((t) => t.replace(/-/g, "_"))]));
     await rmExcept(external_path_default().join(profileDir, "build"), keepPkg, checkTimestamp);
     await rmExcept(external_path_default().join(profileDir, ".fingerprint"), keepPkg, checkTimestamp);
     const keepDeps = new Set(packages.flatMap((p) => {
@@ -79828,10 +79857,10 @@ async function cleanProfileTarget(profileDir, packages, checkTimestamp = false) 
 async function getCargoBins() {
     const bins = new Set();
     try {
-        const { installs } = JSON.parse(await external_fs_default().promises.readFile(external_path_default().join(config_CARGO_HOME, ".crates2.json"), "utf8"));
-        for (const pkg of Object.values(installs)) {
-            for (const bin of pkg.bins) {
-                bins.add(bin);
+        const dir = await external_fs_default().promises.opendir(external_path_default().join(config_CARGO_HOME, "bin"));
+        for await (const dirent of dir) {
+            if (dirent.isFile()) {
+                bins.add(dirent.name);
             }
         }
     }
@@ -79845,13 +79874,10 @@ async function getCargoBins() {
  * @param oldBins The binaries that existed when the action started.
  */
 async function cleanBin(oldBins) {
-    const bins = await getCargoBins();
-    for (const bin of oldBins) {
-        bins.delete(bin);
-    }
+    const binsToRemove = new Set(oldBins);
     const dir = await fs.promises.opendir(path.join(CARGO_HOME, "bin"));
     for await (const dirent of dir) {
-        if (dirent.isFile() && !bins.has(dirent.name)) {
+        if (dirent.isFile() && binsToRemove.has(dirent.name)) {
             await rm(dir.path, dirent);
         }
     }
@@ -80085,7 +80111,7 @@ async function run() {
             lookupOnly,
         });
         if (restoreKey) {
-            const match = restoreKey === key;
+            const match = restoreKey.localeCompare(key, undefined, { sensitivity: "accent" }) === 0;
             lib_core.info(`${lookupOnly ? "Found" : "Restored from"} cache key "${restoreKey}" full match: ${match}.`);
             if (!match) {
                 // pre-clean the target directory on cache mismatch
