@@ -3,7 +3,7 @@ import path from "path";
 
 import { getCmdOutput } from "./utils";
 
-const SAVE_TARGETS = new Set(["lib", "proc-macro"]);
+const SAVE_TARGETS = new Set(["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"]);
 
 export class Workspace {
   constructor(public root: string, public target: string) {}
@@ -15,6 +15,7 @@ export class Workspace {
       const meta: Meta = JSON.parse(
         await getCmdOutput("cargo", ["metadata", "--all-features", "--format-version", "1", ...extraArgs], {
           cwd: this.root,
+          env: { ...process.env, "CARGO_ENCODED_RUSTFLAGS": "" },
         }),
       );
       core.debug(`workspace "${this.root}" has ${meta.packages.length} packages`);

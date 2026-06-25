@@ -79396,7 +79396,7 @@ async function exists(path) {
 
 
 
-const SAVE_TARGETS = new Set(["lib", "proc-macro"]);
+const SAVE_TARGETS = new Set(["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"]);
 class Workspace {
     constructor(root, target) {
         this.root = root;
@@ -79408,6 +79408,7 @@ class Workspace {
             core.debug(`collecting metadata for "${this.root}"`);
             const meta = JSON.parse(await getCmdOutput("cargo", ["metadata", "--all-features", "--format-version", "1", ...extraArgs], {
                 cwd: this.root,
+                env: { ...process.env, "CARGO_ENCODED_RUSTFLAGS": "" },
             }));
             core.debug(`workspace "${this.root}" has ${meta.packages.length} packages`);
             for (const pkg of meta.packages.filter(filter)) {
@@ -79461,7 +79462,7 @@ class CacheConfig {
         /** The prefix portion of the cache key */
         this.keyPrefix = "";
         /** The rust version considered for the cache key */
-        this.keyRust = "";
+        this.keyRust = [];
         /** The environment variables considered for the cache key */
         this.keyEnvs = [];
         /** The files considered for the cache key */
@@ -79504,12 +79505,14 @@ class CacheConfig {
         // The env vars are sorted, matched by prefix and hashed into the
         // resulting environment hash.
         let hasher = external_crypto_default().createHash("sha1");
-        const rustVersion = await getRustVersion();
-        let keyRust = `${rustVersion.release} ${rustVersion.host}`;
-        hasher.update(keyRust);
-        hasher.update(rustVersion["commit-hash"]);
-        keyRust += ` (${rustVersion["commit-hash"]})`;
-        self.keyRust = keyRust;
+        // Map toolchains to their version strings, then sort + dedupe so an
+        // equivalent set of toolchains always yields the same cache key,
+        // regardless of how they were enumerated.
+        const keyRustVersions = Array.from(new Set(Array.from(await getRustVersions()).map(({ release, host, "commit-hash": commitHash }) => `${release} ${host} ${commitHash}`))).sort();
+        for (const keyRust of keyRustVersions) {
+            hasher.update(keyRust);
+            self.keyRust.push(keyRust);
+        }
         // these prefixes should cover most of the compiler / rust / cargo keys
         const envPrefixes = ["CARGO", "CC", "CFLAGS", "CXX", "CMAKE", "RUST"];
         envPrefixes.push(...core.getInput("env-vars").split(/\s+/).filter(Boolean));
@@ -79688,7 +79691,10 @@ class CacheConfig {
         core.info(`.. Prefix:`);
         core.info(`  - ${this.keyPrefix}`);
         core.info(`.. Environment considered:`);
-        core.info(`  - Rust Version: ${this.keyRust}`);
+        core.info(`  - Rust Versions:`);
+        for (const rust of this.keyRust) {
+            core.info(`    - ${rust}`);
+        }
         for (const env of this.keyEnvs) {
             core.info(`  - ${env}`);
         }
@@ -79723,9 +79729,31 @@ function isCacheUpToDate() {
 function digest(hasher) {
     return hasher.digest("hex").substring(0, HASH_LENGTH);
 }
-async function getRustVersion() {
-    const stdout = await getCmdOutput("rustc", ["-vV"]);
-    let splits = stdout
+async function getRustVersions() {
+    const versions = new Set();
+    versions.add(parseRustVersion(await getCmdOutput("rustc", ["-vV"])));
+    const stdout = await (async () => {
+        try {
+            return await getCmdOutput("rustup", ["toolchain", "list", "--quiet"]);
+        }
+        catch (e) {
+            core.warning(`Error running rustup toolchain list, falling back to default toolchain only: ${e}`);
+            return undefined;
+        }
+    })();
+    if (stdout !== undefined) {
+        for (const toolchain of stdout.split(/[\n\r]+/)) {
+            const trimmed = toolchain.trim();
+            if (!trimmed) {
+                continue;
+            }
+            versions.add(parseRustVersion(await getCmdOutput("rustup", ["run", trimmed, "rustc", "-vV"])));
+        }
+    }
+    return versions;
+}
+function parseRustVersion(stdout) {
+    const splits = stdout
         .split(/[\n\r]+/)
         .filter(Boolean)
         .map((s) => s.split(":").map((s) => s.trim()))
@@ -79812,7 +79840,7 @@ async function cleanProfileTarget(profileDir, packages, checkTimestamp = false) 
     }
     let keepProfile = new Set(["build", ".fingerprint", "deps"]);
     await rmExcept(profileDir, keepProfile);
-    const keepPkg = new Set(packages.map((p) => p.name));
+    const keepPkg = new Set(packages.flatMap((p) => [p.name, ...p.targets.map((t) => t.replace(/-/g, "_"))]));
     await rmExcept(external_path_default().join(profileDir, "build"), keepPkg, checkTimestamp);
     await rmExcept(external_path_default().join(profileDir, ".fingerprint"), keepPkg, checkTimestamp);
     const keepDeps = new Set(packages.flatMap((p) => {
@@ -79828,10 +79856,10 @@ async function cleanProfileTarget(profileDir, packages, checkTimestamp = false) 
 async function getCargoBins() {
     const bins = new Set();
     try {
-        const { installs } = JSON.parse(await external_fs_default().promises.readFile(external_path_default().join(CARGO_HOME, ".crates2.json"), "utf8"));
-        for (const pkg of Object.values(installs)) {
-            for (const bin of pkg.bins) {
-                bins.add(bin);
+        const dir = await external_fs_default().promises.opendir(external_path_default().join(CARGO_HOME, "bin"));
+        for await (const dirent of dir) {
+            if (dirent.isFile()) {
+                bins.add(dirent.name);
             }
         }
     }
@@ -79845,13 +79873,10 @@ async function getCargoBins() {
  * @param oldBins The binaries that existed when the action started.
  */
 async function cleanBin(oldBins) {
-    const bins = await getCargoBins();
-    for (const bin of oldBins) {
-        bins.delete(bin);
-    }
+    const binsToRemove = new Set(oldBins);
     const dir = await external_fs_default().promises.opendir(external_path_default().join(CARGO_HOME, "bin"));
     for await (const dirent of dir) {
-        if (dirent.isFile() && !bins.has(dirent.name)) {
+        if (dirent.isFile() && binsToRemove.has(dirent.name)) {
             await rm(dir.path, dirent);
         }
     }
@@ -80077,9 +80102,14 @@ async function run() {
         if (process.env["RUNNER_OS"] == "macOS") {
             await macOsWorkaround();
         }
+        const cacheWorkspaceCrates = core.getInput("cache-workspace-crates").toLowerCase() || "false";
         const allPackages = [];
         for (const workspace of config.workspaces) {
             const packages = await workspace.getPackagesOutsideWorkspaceRoot();
+            if (cacheWorkspaceCrates === "true") {
+                const wsMembers = await workspace.getWorkspaceMembers();
+                packages.push(...wsMembers);
+            }
             allPackages.push(...packages);
             try {
                 core.info(`... Cleaning ${workspace.target} ...`);
