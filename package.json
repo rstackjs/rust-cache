@@ -47,6 +47,7 @@
   "scripts": {
     "prepare": "ncc build --target es2020 -o dist/restore src/restore.ts && ncc build --target es2020 -o dist/save src/save.ts && linefix dist"
   },
+  "packageManager": "pnpm@11.5.0",
   "pnpm": {
     "ignoredBuiltDependencies": [
       "tos-crc64-js"
