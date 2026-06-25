@@ -89,13 +89,18 @@ export class CacheConfig {
     // resulting environment hash.
 
     let hasher = crypto.createHash("sha1");
-    const rustVersions = Array.from(await getRustVersions());
-    // Doesn't matter how they're sorted, just as long as it's deterministic.
-    rustVersions.sort();
+    // Map toolchains to their version strings, then sort + dedupe so an
+    // equivalent set of toolchains always yields the same cache key,
+    // regardless of how they were enumerated.
+    const keyRustVersions = Array.from(
+      new Set(
+        Array.from(await getRustVersions()).map(
+          ({ release, host, "commit-hash": commitHash }) => `${release} ${host} ${commitHash}`,
+        ),
+      ),
+    ).sort();
 
-    for (const rustVersion of rustVersions) {
-      const { release, host, "commit-hash": commitHash } = rustVersion;
-      const keyRust = `${release} ${host} ${commitHash}`;
+    for (const keyRust of keyRustVersions) {
       hasher.update(keyRust);
       self.keyRust.push(keyRust);
     }
