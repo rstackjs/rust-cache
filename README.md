@@ -1,9 +1,10 @@
-# Note
+# Notice
 
-> It's modified for Rspack's self-hosted runner's rust cache management. 
-> And It can not function properly in other runner environments.
+This action is forked from [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache). It replaces the cache backend with a **Volcengine TOS (Object Storage, S3-compatible)** backend so that Rspack's self-hosted CI can cache cargo build artifacts in TOS, and adds a few options on top (`cache-workspace-crates`, `fullmatch-only`).
 
-Fork from https://github.com/Swatinem/rust-cache
+> It is specialized for Rspack's self-hosted runners and may not function properly in other runner environments where TOS credentials are not available.
+
+> Big thanks to [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) creators and contributors for their great work. ❤️
 
 # Rust Cache Action
 
